@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	starkfelt "github.com/NethermindEth/juno/core/felt"
@@ -47,13 +48,17 @@ type BaseExchange struct {
 	// SetMarkets / SetCurrencies / the Add*Entry copies build a whole new map and assign the field
 	// (see exchange_markets_book.go). Values stay map[string]any rows / []any lists, as the TS
 	// types declare them (markets: Dictionary<any>, markets_by_id: Dictionary<any>).
-	Markets              map[string]any
-	Markets_by_id        map[string]any
-	Currencies           map[string]any
-	Currencies_by_id     map[string]any
-	Has                  map[string]any
-	Api                  map[string]any
-	TransformedApi       map[string]any
+	Markets          map[string]any
+	Markets_by_id    map[string]any
+	Currencies       map[string]any
+	Currencies_by_id map[string]any
+	Has              map[string]any
+	Api              map[string]any
+	TransformedApi   map[string]any
+	// requestIdsMu guards requestIds. NextRequestId is called from concurrent
+	// subscription goroutines (Kucoin's SubscribeMultipleAsync is one path), so
+	// the lazily-created map must not be read and written without a lock.
+	requestIdsMu         sync.Mutex
 	requestIds           map[string]int64
 	lastNonce            int64
 	lastNonceSet         bool

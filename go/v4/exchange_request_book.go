@@ -64,6 +64,8 @@ func (this *BaseExchange) readRequestBook() requestBookSnapshot {
 // NextRequestId returns the next value of one request id counter, seeded on first use from
 // the option of the same name.
 func (this *BaseExchange) NextRequestId(key string) int64 {
+	this.requestIdsMu.Lock()
+	defer this.requestIdsMu.Unlock()
 	if this.requestIds == nil {
 		this.requestIds = map[string]int64{}
 	}
