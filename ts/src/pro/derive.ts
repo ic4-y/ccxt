@@ -521,7 +521,13 @@ export default class derive extends deriveRest {
         //
         //
         const params = this.safeDict (message, 'params');
-        const data = this.safeDict (params, 'data', {});
+        let data: List = this.safeValue (params, 'data', []);
+        if (data === undefined || data === null) {
+            data = [];
+        } else if (!Array.isArray (data)) {
+            // the venue sends an array of trades, but some frames carry a single object
+            data = [ data ];
+        }
         const topic = this.safeString (params, 'channel', '');
         const parsedTopic = topic.split ('.');
         const marketId = this.safeString (parsedTopic, 1);
