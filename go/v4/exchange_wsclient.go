@@ -172,6 +172,26 @@ func (this *WSClient) handleMessages(conn *websocket.Conn) {
 			return
 		}
 
+		// the received phase is taken here, on the read goroutine, before any
+		// decoding: everything after this point is the library's own work, so the
+		// span to dispatched is the parse-and-dispatch cost a caller cannot
+		// otherwise separate from network time. The fields are read-goroutine
+		// confined; a hook-less client pays one nil check per frame.
+		if this.frameHook != nil {
+			this.frameID++
+			now := time.Now()
+			this.frame = WsFrameEvent{
+				ID:       this.frameID,
+				Phase:    WsFrameReceived,
+				Client:   this,
+				URL:      this.Url,
+				Bytes:    len(data),
+				At:       now,
+				Received: now,
+			}
+			this.frameHook(this.frame)
+		}
+
 		// gorilla routes control frames to the Ping/Pong/Close handlers during
 		// the read, ReadMessage only ever returns Text or Binary, so the former
 		// Ping, Pong and Close arms here were unreachable dead code; the Ping
@@ -186,6 +206,16 @@ func (this *WSClient) handleMessages(conn *websocket.Conn) {
 			this.OnMessage(string(data))
 		case websocket.BinaryMessage:
 			this.OnMessage(data)
+		}
+
+		if !this.frame.Received.IsZero() {
+			this.frame.Dispatched = time.Now()
+			this.frame.At = this.frame.Dispatched
+			this.frame.Phase = WsFrameDispatched
+			if this.frameHook != nil {
+				this.frameHook(this.frame)
+			}
+			this.frame = WsFrameEvent{}
 		}
 	}
 }
