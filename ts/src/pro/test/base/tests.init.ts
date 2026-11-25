@@ -7,6 +7,7 @@ import testWsSingleFlightWiring from "./test.singleFlightWiring.js";
 import testWsKeepAliveTimeout from "./test.keepAliveTimeout.js";
 import testWsClientThrottleWiring from "./test.clientThrottleWiring.js";
 import testBingxOrderFreshness from "./test.bingxOrderFreshness.js";
+import testDeriveHandleTrade from "./test.handleTrade.derive.js";
 import testHyperliquidPendingUnsubscribe from "./test.pendingUnsubscribe.hyperliquid.js";
 
 async function testBaseWs () {
@@ -14,6 +15,7 @@ async function testBaseWs () {
     testWsCache ();
     testWsCacheNative (); // js-only: removeAt () has no port equivalent
     testBingxOrderFreshness (); // js-only: native handler/cache regression test
+    await testDeriveHandleTrade (); // native handler regression test, not transpiled
     // todo : testWsClose ();
     await testWsSingleFlight ();
     await testWsSingleFlightWiring ();
