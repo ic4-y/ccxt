@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // mockBodyForUrl picks the response-test body whose url fragment the request url
@@ -231,7 +233,35 @@ func (this *BaseExchange) FetchAsync(url any, method any, headers any, body any)
 
 		// strings.NewReader()
 		// Send the request
+		var timing RestResponseTiming
+		var event RestEvent
+		hook := this.restHook
+		if hook != nil {
+			now := time.Now()
+			timing = RestResponseTiming{Url: urlStr, Method: methodStr, RequestAt: now}
+			event = RestEvent{
+				ID:        atomic.AddUint64(&this.restRequestID, 1),
+				Phase:     RestRequest,
+				URL:       urlStr,
+				Method:    methodStr,
+				At:        now,
+				RequestAt: now,
+			}
+			hook(event)
+		}
 		resp, err := this.httpClient.Do(req)
+		if hook != nil && resp != nil {
+			// Do returns once the response head is in: everything after this is
+			// body transfer plus decode, which is the caller-visible remainder
+			now := time.Now()
+			timing.HeadersAt = now
+			timing.Status = resp.StatusCode
+			event.HeadersAt = now
+			event.At = now
+			event.Phase = RestHeaders
+			event.Status = resp.StatusCode
+			hook(event)
+		}
 
 		// Read the response body
 		// respBody, err := ioutil.ReadAll(resp.Body)
@@ -270,6 +300,16 @@ func (this *BaseExchange) FetchAsync(url any, method any, headers any, body any)
 		}
 
 		responseHeaders := HeaderToMap(resp.Header)
+		if hook != nil {
+			now := time.Now()
+			timing.BodyAt = now
+			timing.Bytes = len(respBody)
+			event.BodyAt = now
+			event.At = now
+			event.Phase = RestBody
+			event.Bytes = len(respBody)
+			hook(event)
+		}
 
 		// Use ParseJSON to handle JSON parsing with proper number normalization
 		var result any
@@ -285,6 +325,15 @@ func (this *BaseExchange) FetchAsync(url any, method any, headers any, body any)
 					result = resultMap
 				}
 			}
+		}
+		if hook != nil {
+			// the decoded value the venue handler will see is final at this point
+			now := time.Now()
+			timing.DecodedAt = now
+			event.DecodedAt = now
+			event.At = now
+			event.Phase = RestDecoded
+			hook(event)
 		}
 
 		// Log the response (for debugging purposes)
@@ -340,4 +389,99 @@ func HeaderToMap(header http.Header) map[string]any {
 		}
 	}
 	return result
+}
+
+// RestPhase names one point of a REST round trip's timeline.
+type RestPhase int
+
+const (
+	// RestRequest fires just before the transport call, with the request URL and
+	// method: the span's starting point.
+	RestRequest RestPhase = iota
+	// RestHeaders fires once httpClient.Do returns and the response head is in.
+	RestHeaders
+	// RestBody fires once the body has been read (and inflated, if gzipped).
+	RestBody
+	// RestDecoded fires once the body has become the value the venue handler sees
+	// (ParseJSON, or the raw string when the body is not JSON).
+	RestDecoded
+)
+
+func (phase RestPhase) String() string {
+	switch phase {
+	case RestRequest:
+		return "request"
+	case RestHeaders:
+		return "headers"
+	case RestBody:
+		return "body"
+	case RestDecoded:
+		return "decoded"
+	}
+	return "unknown"
+}
+
+// RestEvent is one phase notification for one REST round trip. ID is stable
+// across the four phases of a request; At is the phase's instant, while
+// RequestAt/HeadersAt/BodyAt/DecodedAt carry the timeline known so far. ccxt takes
+// no tracing dependency: an adapter starts a span at RestRequest, annotates
+// Status/Bytes at RestHeaders/RestBody and ends it at RestDecoded.
+type RestEvent struct {
+	ID        uint64
+	Phase     RestPhase
+	URL       string
+	Method    string
+	Status    int
+	Bytes     int
+	At        time.Time
+	RequestAt time.Time
+	HeadersAt time.Time
+	BodyAt    time.Time
+	DecodedAt time.Time
+}
+
+// Timing projects the event's timeline, so timing-only consumers keep the shape
+// the earlier observer exposed.
+func (event RestEvent) Timing() RestResponseTiming {
+	return RestResponseTiming{
+		Url:       event.URL,
+		Method:    event.Method,
+		Status:    event.Status,
+		Bytes:     event.Bytes,
+		RequestAt: event.RequestAt,
+		HeadersAt: event.HeadersAt,
+		BodyAt:    event.BodyAt,
+		DecodedAt: event.DecodedAt,
+	}
+}
+
+// Duration returns the whole observed span known so far, request start to
+// decoded value.
+func (event RestEvent) Duration() time.Duration {
+	return event.Timing().Duration()
+}
+
+// RestResponseTiming is one REST exchange's receive-side timeline. RequestAt is
+// taken just before the transport call, HeadersAt when the response head is in,
+// BodyAt when the body has been read (and inflated, when the response was
+// gzipped) and DecodedAt when the body has been turned into the value the venue
+// handler sees. The library's own share is BodyAt->DecodedAt (decode); the
+// network's share is RequestAt->BodyAt.
+type RestResponseTiming struct {
+	Url       string
+	Method    string
+	Status    int
+	Bytes     int
+	RequestAt time.Time
+	HeadersAt time.Time
+	BodyAt    time.Time
+	DecodedAt time.Time
+}
+
+// Duration returns the whole observe span, request start to decoded value.
+func (t RestResponseTiming) Duration() time.Duration {
+	if t.RequestAt.IsZero() || t.DecodedAt.IsZero() {
+		return 0
+	}
+	return t.DecodedAt.Sub(t.RequestAt)
 }

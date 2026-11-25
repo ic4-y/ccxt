@@ -217,6 +217,15 @@ type BaseExchange struct {
 	Clients    map[string]any
 	newUpdates bool
 	streaming  map[string]any
+	// ws frame phase hook handed to every ws client this exchange creates (see
+	// SetWsFrameHook); read when a client is built, before any frame is read
+	wsFrameHook func(event WsFrameEvent)
+	// rest phase hook called on the request goroutine for every FetchAsync round
+	// trip (see SetRestHook)
+	restHook func(event RestEvent)
+	// restRequestID numbers rest round trips for the hook; only touched with
+	// sync/atomic, because requests run on independent goroutines
+	restRequestID uint64
 
 	// urls views: `urls` holds a Dict per section in the TS base (`urls: { api: Dict }`) and is
 	// written only at config time, so these name the dictionaries it holds (RefreshUrlsViews
@@ -2057,8 +2066,27 @@ func (this *BaseExchange) newWsClient(url any) *WSClient {
 	)
 	var proxyUrl string = this.getWsProxy()
 	client := NewWSClient(url.(string), this.WsDispatch, this.DerivedExchange.OnError, this.DerivedExchange.OnClose, this.DerivedExchange.OnConnected, proxyUrl, options)
+	client.frameHook = this.wsFrameHook
 
 	return client
+}
+
+// SetWsFrameHook installs a per-frame phase observer on every ws client this
+// exchange creates afterwards. Call it before the first Watch*: a client that has
+// already dialed keeps the hook value it was built with, so changing the hook
+// later only affects clients created later. The hook runs on each connection's
+// read goroutine and must not block; nil disables the phases for new clients.
+//
+// The phases expose the library's own per-frame work: WsFrameReceived is taken
+// immediately after the transport read, WsFrameDecoded after the payload became
+// the value the venue handler sees, and WsFrameDispatched after that handler
+// returned and resolved its futures. ccxt stays tracing-agnostic: start a span at
+// WsFrameReceived, annotate Bytes/Kind at WsFrameDecoded and end it at
+// WsFrameDispatched. One frame carrying N events reports one ID and one timeline,
+// shared by all N, because its bytes arrived once. Time-only consumers can use the
+// event's Timing()/Duration() helpers.
+func (this *BaseExchange) SetWsFrameHook(hook func(event WsFrameEvent)) {
+	this.wsFrameHook = hook
 }
 
 func (this *BaseExchange) getWsProxy() string {
@@ -2809,4 +2837,23 @@ func (this *BaseExchange) methodsFor(itf any) map[string]any {
 		return next.methods
 	}).(map[string]any)
 	return table
+}
+
+// SetRestHook installs a phase observer on every REST round trip this exchange
+// makes through its own http client. Call it before the first fetch*: it runs on
+// the request goroutine and must not block; nil disables the phases for new
+// requests.
+//
+// The phases split what a caller cannot see from outside: RestRequest is taken
+// just before the transport call, RestHeaders when the response head is in,
+// RestBody when the body has been read (and inflated) and RestDecoded when the
+// body has been turned into the value the venue handler sees. An adapter can
+// start a span at RestRequest, annotate Status/Bytes at RestHeaders/RestBody and
+// end it at RestDecoded; ccxt takes no tracing dependency. Time-only consumers
+// can use the event's Timing()/Duration() helpers.
+//
+// Requests run on independent goroutines, so the hook can run concurrently; the
+// adapter owns any synchronization.
+func (this *BaseExchange) SetRestHook(hook func(event RestEvent)) {
+	this.restHook = hook
 }

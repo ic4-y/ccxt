@@ -105,6 +105,108 @@ type Client struct {
 	Ping                  any                           // e.g. timer or pong/ping state
 	Throttle              any                           // throttling mechanism (rate limiter, etc.)
 	// Owner any 											// pointer to the exchange that created the client
+
+	// frameHook, when set, observes every phase of every inbound frame. It is
+	// copied from the exchange when the client is built (SetWsFrameHook) and runs
+	// on the read goroutine, so it must not block.
+	frameHook func(event WsFrameEvent)
+	// frame is the event under construction for the frame currently being read:
+	// written and read only by the read goroutine for the duration of one dispatch
+	// (zero when the frame is not tracked, e.g. a direct OnMessage call or a frame
+	// resolved from a snapshot goroutine). Never read it from another goroutine.
+	frame WsFrameEvent
+	// frameID is the id of the last frame this connection read; incremented on the
+	// read goroutine so every phase of one frame shares it.
+	frameID uint64
+}
+
+// WsFramePhase names one point of a frame's receive-side timeline.
+type WsFramePhase int
+
+const (
+	// WsFrameReceived is fired immediately after the transport read returns and
+	// before any decompression or decoding: the raw frame is in memory.
+	WsFrameReceived WsFramePhase = iota
+	// WsFrameDecoded is fired after the payload has become the value the venue
+	// handler receives (JSON decoded, or the text/binary payload preserved).
+	WsFrameDecoded
+	// WsFrameDispatched is fired after the venue handler for the frame returned,
+	// including the futures it resolved.
+	WsFrameDispatched
+)
+
+func (phase WsFramePhase) String() string {
+	switch phase {
+	case WsFrameReceived:
+		return "received"
+	case WsFrameDecoded:
+		return "decoded"
+	case WsFrameDispatched:
+		return "dispatched"
+	}
+	return "unknown"
+}
+
+// WsFrameTiming is one frame's receive-side timeline as observed by the read
+// goroutine. Received is taken immediately after the transport read returns and
+// before any decoding, Decoded after the payload has become a decoded value, and
+// Dispatched after the venue handler for the frame returned (its Resolve calls
+// included). A frame that carries N events shares one timeline, which is what a
+// per-frame attribution wants.
+type WsFrameTiming struct {
+	Received   time.Time
+	Decoded    time.Time
+	Dispatched time.Time
+	Bytes      int
+	Kind       string // "json-object", "json-array", "text" or "binary"
+}
+
+// WsFrameEvent is one phase notification for one inbound frame. ID is stable
+// across the three phases of a frame (and only unique per client connection);
+// At is the phase's instant, while Received/Decoded/Dispatched carry the
+// timeline known so far. The hook is transport-level and exchange-agnostic: an
+// adapter can start a span at WsFrameReceived, annotate it at WsFrameDecoded
+// (Bytes, Kind) and end it at WsFrameDispatched, without ccxt depending on any
+// tracing library.
+type WsFrameEvent struct {
+	ID         uint64
+	Phase      WsFramePhase
+	Client     *WSClient
+	URL        string
+	Bytes      int
+	Kind       string // "json-object", "json-array", "text" or "binary", empty before decode
+	At         time.Time
+	Received   time.Time
+	Decoded    time.Time
+	Dispatched time.Time
+}
+
+// Timing projects the event's timeline, so timing-only consumers keep the shape
+// the earlier observer exposed.
+func (event WsFrameEvent) Timing() WsFrameTiming {
+	return WsFrameTiming{
+		Received:   event.Received,
+		Decoded:    event.Decoded,
+		Dispatched: event.Dispatched,
+		Bytes:      event.Bytes,
+		Kind:       event.Kind,
+	}
+}
+
+// Duration returns the frame-to-dispatch span known so far: everything the
+// library did with the frame after the bytes arrived.
+func (event WsFrameEvent) Duration() time.Duration {
+	return event.Timing().Duration()
+}
+
+// Duration returns the frame-to-dispatch span: everything the library does with
+// the frame after the bytes arrived. It is the number a latency attribution
+// wants to subtract from the caller's own reception time.
+func (t WsFrameTiming) Duration() time.Duration {
+	if t.Received.IsZero() || t.Dispatched.IsZero() {
+		return 0
+	}
+	return t.Dispatched.Sub(t.Received)
 }
 
 func (this *Client) Resolve(data any, subHash any) any {
@@ -469,6 +571,20 @@ func (this *Client) OnMessage(messageEvent any) {
 			if this.Verbose {
 				this.Log(time.Now(), "onMessage JSON.parse", "failed to parse message")
 			}
+		}
+	}
+
+	// fire the decode phase only while the read loop is tracking this frame; a
+	// direct OnMessage call (mock, test) leaves the zero value alone. Decoded is
+	// taken before the venue handler runs, so an adapter can close the parse span
+	// before dispatch work starts.
+	if !this.frame.Received.IsZero() {
+		this.frame.Decoded = time.Now()
+		this.frame.Kind = frameKindOf(parsedMessage, messageIsBinary)
+		this.frame.At = this.frame.Decoded
+		this.frame.Phase = WsFrameDecoded
+		if this.frameHook != nil {
+			this.frameHook(this.frame)
 		}
 	}
 
@@ -1088,4 +1204,24 @@ func (this *dialOwner) run(fn func()) {
 // dialTable returns the dial owner NewClient created.
 func (this *Client) dialTable() *dialOwner {
 	return this.dials
+}
+
+// frameKindOf names the shape a decoded frame reached the venue handler with,
+// so a hook consumer can bucket decode cost by frame type without keeping the
+// payload bytes.
+func frameKindOf(parsed any, binary bool) string {
+	if binary {
+		return "binary"
+	}
+	switch parsed.(type) {
+	case map[string]any:
+		return "json-object"
+	case []any:
+		return "json-array"
+	case string:
+		return "text"
+	case nil:
+		return "text"
+	}
+	return "other"
 }
