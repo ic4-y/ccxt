@@ -330,14 +330,19 @@ func (this *WSClient) OnOpen() {
 }
 
 func (this *WSClient) Close() *Future {
+	if this.Disconnected == nil {
+		this.Disconnected = NewFuture()
+	}
 	if this.HasConnection() {
-		if this.Disconnected == nil {
-			this.Disconnected = NewFuture()
-		}
 		// the conn owner closes the handle and drops it, so the next HasConnection
 		// reads false without a reader having to observe a nil
 		this.closeConnection()
+		return this.Disconnected.(*Future)
 	}
+	// A client that never connected has no close event to await. Resolve the
+	// disconnection future so BaseExchange.Close (and other waiters) returns
+	// instead of blocking forever on a connection that was never established.
+	this.Disconnected.(*Future).Resolve(true)
 	return this.Disconnected.(*Future)
 }
 
