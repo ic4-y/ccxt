@@ -31,6 +31,8 @@ type requestBookSnapshot struct {
 
 // handOffRequestBook applies one bookkeeping write.
 func (this *BaseExchange) handOffRequestBook(op requestBookOp) {
+	this.requestBookMu.Lock()
+	defer this.requestBookMu.Unlock()
 	switch op.kind {
 	case requestBookStamp:
 		this.LastRestRequestTimestamp = op.stamp
@@ -51,6 +53,8 @@ func (this *BaseExchange) handOffRequestBook(op requestBookOp) {
 
 // readRequestBook returns the current bookkeeping fields.
 func (this *BaseExchange) readRequestBook() requestBookSnapshot {
+	this.requestBookMu.RLock()
+	defer this.requestBookMu.RUnlock()
 	return requestBookSnapshot{
 		stamp:           this.LastRestRequestTimestamp,
 		requestHeaders:  this.Last_request_headers,
@@ -92,5 +96,5 @@ func (this *BaseExchange) nextNonce(current int64) int64 {
 
 // GetLast_http_response returns the last raw http response.
 func (this *BaseExchange) GetLast_http_response() any {
-	return this.Last_http_response
+	return this.readRequestBook().httpResponse
 }

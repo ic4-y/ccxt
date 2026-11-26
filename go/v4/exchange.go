@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	starkfelt "github.com/NethermindEth/juno/core/felt"
@@ -101,6 +102,9 @@ type BaseExchange struct {
 	AccountsById any
 	Accounts     any
 
+	// requestBookMu guards the last request/response fields below: handOffRequestBook
+	// writes them and readRequestBook reads them from concurrent fetch goroutines.
+	requestBookMu sync.RWMutex
 	// timestamps
 	LastRestRequestTimestamp int64
 	// the last request/response fields below are plain fields (exchange_request_book.go)
